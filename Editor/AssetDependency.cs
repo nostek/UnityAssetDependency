@@ -28,6 +28,9 @@ public class AssetDependency : AssetPostprocessor
 		UnityEngine.Object[] objs = Selection.objects;
 		foreach (var obj in objs)
 		{
+			if (obj == null)
+				continue;
+			
 			string path = AssetDatabase.GetAssetPath(obj);
 			string guid = AssetDatabase.AssetPathToGUID(path);
 
