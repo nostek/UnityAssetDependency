@@ -6,11 +6,14 @@ namespace UnityAssetDependency
 {
 	public class AssetResultsWindow : EditorWindow
 	{
-		Dictionary<string, HashSet<string>> allResults = new Dictionary<string, HashSet<string>>();
+		Dictionary<string, List<string>> allResults = new Dictionary<string, List<string>>();
 
 		Vector2 scroll;
 
-		public static void ShowWindow(Dictionary<string, HashSet<string>> allResults)
+		bool showUsed = true;
+		bool showUnused = true;
+
+		public static void ShowWindow(Dictionary<string, List<string>> allResults)
 		{
 			var window = EditorWindow.GetWindow<AssetResultsWindow>();
 			window.titleContent = new GUIContent("Dependency");
@@ -22,20 +25,31 @@ namespace UnityAssetDependency
 		{
 			string clicked = null;
 
+			var btnStyle = GUI.skin.button;
+			btnStyle.alignment = TextAnchor.MiddleLeft;
+
+			using (new EditorGUILayout.HorizontalScope())
+			{
+				showUsed = EditorGUILayout.Toggle("Show Used", showUsed);
+				showUnused = EditorGUILayout.Toggle("Show Unused", showUnused);
+			}
+
 			scroll = EditorGUILayout.BeginScrollView(scroll);
 			EditorGUILayout.BeginVertical();
 
-			int index = 0;
 			foreach (var kvp in allResults)
 			{
-				index++;
+				if (!showUsed && kvp.Value.Count != 0)
+					continue;
+				if (!showUnused && kvp.Value.Count == 0)
+					continue;
 
 				EditorGUILayout.LabelField(kvp.Key, EditorStyles.boldLabel);
 
 				EditorGUILayout.BeginVertical(EditorStyles.helpBox);
 				EditorGUILayout.LabelField("Found in:");
 				foreach (var path in kvp.Value)
-					if (GUILayout.Button(path))
+					if (GUILayout.Button(path, btnStyle))
 						clicked = path;
 				EditorGUILayout.EndVertical();
 
@@ -48,12 +62,49 @@ namespace UnityAssetDependency
 
 			EditorGUILayout.Space();
 
+			EditorGUILayout.BeginHorizontal();
+
+			if (GUILayout.Button("Select Used"))
+			{
+				List<Object> objs = new List<Object>();
+				foreach (var kvp in allResults)
+					if (kvp.Value.Count > 0)
+						objs.Add(AssetDatabase.LoadMainAssetAtPath(kvp.Key));
+				foreach (var o in objs)
+					EditorGUIUtility.PingObject(o);
+				Selection.objects = objs.ToArray();
+			}
+
+			if (GUILayout.Button("Select Unused"))
+			{
+				List<Object> objs = new List<Object>();
+				foreach (var kvp in allResults)
+					if (kvp.Value.Count == 0)
+						objs.Add(AssetDatabase.LoadMainAssetAtPath(kvp.Key));
+				foreach (var o in objs)
+					EditorGUIUtility.PingObject(o);
+				Selection.objects = objs.ToArray();
+			}
+
+			if (GUILayout.Button("Select References"))
+			{
+				List<Object> objs = new List<Object>();
+				foreach (var kvp in allResults)
+					foreach (var path in kvp.Value)
+						objs.Add(AssetDatabase.LoadMainAssetAtPath(path));
+				foreach (var o in objs)
+					EditorGUIUtility.PingObject(o);
+				Selection.objects = objs.ToArray();
+			}
+
 			if (GUILayout.Button("Close"))
 				Close();
 
+			EditorGUILayout.EndHorizontal();
+
 			if (clicked != null)
 			{
-				var obj = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(clicked);
+				var obj = AssetDatabase.LoadMainAssetAtPath(clicked);
 				if (obj != null)
 					EditorGUIUtility.PingObject(obj);
 			}
@@ -62,23 +113,22 @@ namespace UnityAssetDependency
 
 	public class AssetDependency : AssetPostprocessor
 	{
-		static string[] allGuids = null;
 		static Dictionary<string, List<string>> database = null;
 
 		static void OnPostprocessAllAssets(string[] importedAssets, string[] deletedAssets, string[] movedAssets, string[] movedFromAssetPaths)
 		{
-			allGuids = null;
 			database = null;
 		}
 
 		[MenuItem("Assets/Find Where Used In Project", false, 30)]
 		static void CheckUsage()
 		{
-			//float start = Time.realtimeSinceStartup;
+			var sw = new System.Diagnostics.Stopwatch();
+			sw.Start();
 
 			BuildDatabase();
 
-			Dictionary<string, HashSet<string>> allResults = new Dictionary<string, HashSet<string>>();
+			Dictionary<string, List<string>> allResults = new Dictionary<string, List<string>>();
 
 			bool foundAnything = false;
 
@@ -91,37 +141,22 @@ namespace UnityAssetDependency
 				HashSet<string> results = new HashSet<string>();
 
 				string path = AssetDatabase.GetAssetPath(obj);
-				string guid = AssetDatabase.AssetPathToGUID(path);
 
-				if (AssetDatabase.IsValidFolder(path))
-					continue;
-
-				List<string> users = null;
-				if (database.TryGetValue(guid, out users))
-					foreach (var u in users)
-						results.Add(AssetDatabase.GUIDToAssetPath(u));
+				List<string> dependants = null;
+				if (database.TryGetValue(path, out dependants))
+					foreach (var depPath in dependants)
+						results.Add(depPath);
 
 				foundAnything |= results.Count > 0;
 
-				allResults.Add(path, results);
+				var sorted = new List<string>(results);
+				sorted.Sort();
+
+				allResults.Add(path, sorted);
 			}
 
-			/*
-			Log.D("The following assets are not used:");
-			foreach (var guid in allGuids)
-			{
-				var path = AssetDatabase.GUIDToAssetPath(guid);
-				var type = AssetDatabase.GetMainAssetTypeAtPath(path);
-
-				if (type == typeof(UnityEditor.DefaultAsset))
-					continue;
-
-				if (!database.ContainsKey(guid))
-					Log.D(path);
-			}
-			*/
-
-			//float stop = Time.realtimeSinceStartup;
+			sw.Stop();
+			// Debug.Log("Search Time: " + sw.ElapsedMilliseconds + "ms");
 
 			if (foundAnything)
 				AssetResultsWindow.ShowWindow(allResults);
@@ -132,35 +167,41 @@ namespace UnityAssetDependency
 		static void BuildDatabase()
 		{
 			//Already built database.
-			if (allGuids != null && database != null)
+			if (database != null)
 				return;
 
 			EditorUtility.DisplayProgressBar("Building database", "Caching dependencies..", 0f);
 
-			allGuids = AssetDatabase.FindAssets("t:object");
+			var paths = AssetDatabase.GetAllAssetPaths();
 
 			database = new Dictionary<string, List<string>>();
 
-			float step = 1f / (float)allGuids.Length;
+			float step = 1f / (float)paths.Length;
 			float progress = 0f;
 
-			for (int i = 0; i < allGuids.Length; i++)
+			for (int i = 0, imax = paths.Length; i < imax; ++i)
 			{
-				var guid = allGuids[i];
-				var dependencies = AssetDatabase.GetDependencies(AssetDatabase.GUIDToAssetPath(guid), false);
+				var path = paths[i];
 
-				foreach (var dep in dependencies)
+				if (AssetDatabase.IsValidFolder(path))
+					continue;
+
+				if (!path.StartsWith("Assets/"))
+					continue;
+
+				var dependencies = AssetDatabase.GetDependencies(path, false);
+
+				for (int x = 0, xmax = dependencies.Length; x < xmax; ++x)
 				{
-					var g = AssetDatabase.AssetPathToGUID(dep);
+					var otherPath = dependencies[x];
 
-					List<string> refs = null;
-					if (!database.TryGetValue(g, out refs))
+					if (!database.TryGetValue(otherPath, out var refs))
 					{
 						refs = new List<string>();
-						database.Add(g, refs);
+						database.Add(otherPath, refs);
 					}
 
-					refs.Add(guid);
+					refs.Add(path);
 				}
 
 				progress += step;
